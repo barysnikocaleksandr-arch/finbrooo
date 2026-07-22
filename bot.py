@@ -7,7 +7,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from datetime import datetime
 
-# --- ЗАГЛУШКА ДЛЯ RENDER (чтобы он не убивал бота) ---
+# --- Заглушка, чтобы Render не убивал бота ---
 from aiohttp import web
 import threading
 
@@ -20,8 +20,9 @@ def run_web_server():
     web.run_app(app, host='0.0.0.0', port=10000)
 
 threading.Thread(target=run_web_server, daemon=True).start()
-# -------------------------------------------------------
+# ------------------------------------------------
 
+# ТВОЙ ТОКЕН
 BOT_TOKEN = "8856832421:AAEWvsUoVd5XTpOsnRcSfWSrCsM8jlvp-mw"
 
 bot = Bot(token=BOT_TOKEN)
@@ -29,11 +30,16 @@ dp = Dispatcher()
 
 # --- КНОПКИ МЕНЮ ---
 def get_main_keyboard():
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(KeyboardButton("💰 Баланс"), KeyboardButton("📊 Статистика"))
-    keyboard.add(KeyboardButton("🎯 Цель"))
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="🎯 Цель")]
+        ],
+        resize_keyboard=True
+    )
     return keyboard
 
+# --- БАЗА ДАННЫХ ---
 conn = sqlite3.connect('finance.db')
 cursor = conn.cursor()
 cursor.execute('''
@@ -67,6 +73,7 @@ def get_category_expenses():
     cursor.execute("SELECT category, SUM(amount) FROM transactions WHERE type = 'Расход' AND category != 'Не указана' GROUP BY category")
     return cursor.fetchall()
 
+# --- ПАРСЕР ---
 def parse_money(text):
     amounts = re.findall(r'\b\d+\b', text)
     if not amounts:
@@ -101,6 +108,7 @@ def parse_money(text):
         
     return "Расход", amount, "Прочее", None
 
+# --- ГЕНЕРАТОР ГРАФИКОВ ---
 def create_stats_chart():
     categories = get_category_expenses()
     if not categories:
@@ -119,6 +127,7 @@ def create_stats_chart():
     plt.close()
     return buf
 
+# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
 @dp.message()
 async def handle_message(message: types.Message):
     text = message.text
@@ -191,6 +200,7 @@ async def handle_message(message: types.Message):
                 reply_markup=get_main_keyboard()
             )
 
+# --- ЗАПУСК ---
 if __name__ == "__main__":
     print("🚀 Бот и веб-заглушка запущены! Render теперь доволен.")
     asyncio.run(dp.start_polling(bot))
