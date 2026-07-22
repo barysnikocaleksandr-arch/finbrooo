@@ -29,7 +29,8 @@ def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="⚙️ Мой лимит"), KeyboardButton(text="🎯 Цель")]
+            [KeyboardButton(text="⚙️ Мой лимит"), KeyboardButton(text="🎯 Цель")],
+            [KeyboardButton(text="🧘 Тренер")]
         ],
         resize_keyboard=True
     )
@@ -80,8 +81,8 @@ def get_balance(user_id):
     expense = cursor.fetchone()[0] or 0
     return income - expense
 
-def get_category_expenses(user_id):
-    cursor.execute("SELECT category, SUM(amount) FROM transactions WHERE user_id = ? AND type = 'Расход' AND category != 'Не указана' GROUP BY category", (user_id,))
+def get_category_expenses(user_id, days=30):
+    cursor.execute("SELECT category, SUM(amount) FROM transactions WHERE user_id = ? AND type = 'Расход' AND date >= date('now', ?) AND category != 'Не указана' GROUP BY category", (user_id, f'-{days} days'))
     return cursor.fetchall()
 
 def get_today_expenses(user_id):
@@ -90,7 +91,6 @@ def get_today_expenses(user_id):
     return cursor.fetchone()[0] or 0
 
 def get_avg_daily_expense(user_id):
-    # Считаем средние траты за последние 7 дней
     cursor.execute("SELECT AVG(amount) FROM (SELECT SUM(amount) as amount FROM transactions WHERE user_id = ? AND type = 'Расход' GROUP BY date ORDER BY date DESC LIMIT 7)", (user_id,))
     res = cursor.fetchone()[0]
     return int(res) if res else 0
@@ -136,38 +136,26 @@ def parse_money(text):
         
     return "Расход", amount, "Прочее", None
 
-# --- ПРОДВИНУТЫЙ ГЕНЕРАТОР ГРАФИКОВ ---
+# --- ГРАФИК ---
 def create_stats_chart(user_id):
     categories = get_category_expenses(user_id)
     if not categories:
         return None
-        
     labels = [cat[0] for cat in categories]
     sizes = [cat[1] for cat in categories]
     
-    # Стиль как в банковских приложениях (светлая тема с тенями)
     fig, ax = plt.subplots(figsize=(8, 8), facecolor='#f8f9fa')
     colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22']
     
     wedges, texts, autotexts = ax.pie(
-        sizes, 
-        labels=labels, 
-        autopct='%1.0f%%', 
-        startangle=90,
-        colors=colors,
-        wedgeprops={'edgecolor': 'white', 'linewidth': 3, 'antialiased': True}
+        sizes, labels=labels, autopct='%1.0f%%', startangle=90,
+        colors=colors, wedgeprops={'edgecolor': 'white', 'linewidth': 3}
     )
     
-    # Крупный шрифт для процентов
     for autotext in autotexts:
-        autotext.set_color('white')
-        autotext.set_fontsize(12)
-        autotext.set_fontweight('bold')
-        
+        autotext.set_color('white'); autotext.set_fontsize(12); autotext.set_fontweight('bold')
     for text in texts:
-        text.set_fontsize(14)
-        text.set_fontweight('bold')
-        text.set_color('#2c3e50')
+        text.set_fontsize(14); text.set_fontweight('bold'); text.set_color('#2c3e50')
         
     ax.set_title("📊 Распределение расходов", fontsize=20, color='#2c3e50', pad=20, fontweight='bold')
     
@@ -177,13 +165,68 @@ def create_stats_chart(user_id):
     plt.close()
     return buf
 
+# --- ФИНАНСОВЫЙ ТРЕНЕР ---
+def get_financial_advice(user_id):
+    categories = get_category_expenses(user_id, days=14)
+    avg_spend = get_avg_daily_expense(user_id)
+    today_spent = get_today_expenses(user_id)
+    
+    reply = "🧘 **Финансовый тренер:**\n\n"
+    
+    if avg_spend == 0:
+        reply += "📭 Ты еще не записал достаточно трат. Начни вести учет, и я дам крутой разбор!"
+        return reply
+        
+    reply += f"📊 Твой средний расход в день: **{avg_spend} ₽**\n\n"
+    
+    # Анализ категорий
+    category_dict = {cat[0]: cat[1] for cat in categories}
+    
+    tips = []
+    total_tips = 0
+    
+    # 1. Анализ Еды
+    if 'Еда' in category_dict and category_dict['Еда'] > avg_spend * 5:
+        tips.append("🍔 Ты много тратишь на еду. Попробуй готовить дома хотя бы 2 раза в неделю (экономия ~20%).")
+        total_tips += 1
+        
+    # 2. Анализ Транспорта
+    if 'Транспорт' in category_dict and category_dict['Транспорт'] > avg_spend * 3:
+        tips.append("🚗 Такси/бензин съедают бюджет. Попробуй ходить пешком или ездить на общественном транспорте чаще.")
+        total_tips += 1
+        
+    # 3. Анализ Развлечений
+    if 'Развлечения' in category_dict and category_dict['Развлечения'] > avg_spend * 4:
+        tips.append("🎮 На развлечения уходит больше, чем на еду. Попробуй бесплатные активности (прогулка, спорт).")
+        total_tips += 1
+        
+    # 4. Анализ Покупок
+    if 'Покупки' in category_dict and category_dict['Покупки'] > avg_spend * 3:
+        tips.append("🛍️ Шопинг - твоя слабость. Отложи импульсивные покупки на 24 часа.")
+        total_tips += 1
+    
+    # 5. Общий совет по доходам
+    balance = get_balance(user_id)
+    if balance < avg_spend * 10:
+        tips.append("💰 Твоя «подушка безопасности» меньше 10 дней. Постарайся откладывать 10% от каждого дохода.")
+        total_tips += 1
+        
+    # Вывод
+    if total_tips == 0:
+        reply += "✅ Отличная работа! Твой бюджет сбалансирован. Продолжай в том же духе! 🌟"
+    else:
+        reply += "💡 **Советы по улучшению:**\n"
+        for i, tip in enumerate(tips[:3], 1):
+            reply += f"{i}. {tip}\n"
+            
+    return reply
+
 # --- ОБРАБОТЧИК ---
 @dp.message()
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
     text = message.text
     
-    # --- КНОПКИ ---
     if text == "💰 Баланс":
         balance = get_balance(user_id)
         await message.answer(f"💰 Твой текущий баланс: **{balance} ₽**", reply_markup=get_main_keyboard())
@@ -206,15 +249,20 @@ async def handle_message(message: types.Message):
         await message.answer(f"⚙️ Твой текущий лимит: **{curr_limit} ₽/день**\n\nЧтобы изменить, просто напиши новую сумму цифрами (например, `2500`).", reply_markup=get_main_keyboard())
         return
 
+    elif text == "🧘 Тренер":
+        advice = get_financial_advice(user_id)
+        await message.answer(advice, reply_markup=get_main_keyboard())
+        return
+
     text_lower = text.lower()
     
-    # --- КОМАНДЫ ---
     if text_lower == "/start":
         await message.answer(
             "🤖 **Finbro PRO** — твой личный ИИ-коуч!\n\n"
             "📝 Просто пиши: *'Такси 350'* или *'Зарплата 45000'*\n"
             "⚙️ Настрой лимит дня.\n"
-            "🎯 Ставь цели и получай советы.\n\n"
+            "🎯 Ставь цели и получай советы.\n"
+            "🧘 Жми 'Тренер' для разбора твоих трат!\n\n"
             "👇 Жми на кнопки!",
             reply_markup=get_main_keyboard()
         )
@@ -251,13 +299,11 @@ async def handle_message(message: types.Message):
                 
         await message.answer(reply, reply_markup=get_main_keyboard())
 
-    # --- СМЕНА ЛИМИТА ---
     elif text.isdigit():
         new_limit = int(text)
         set_user_limit(user_id, new_limit)
         await message.answer(f"✅ Дневной лимит обновлен до **{new_limit} ₽**!", reply_markup=get_main_keyboard())
 
-    # --- ЗАПИСЬ ТРАТ ---
     else:
         t_type, amount, category, error = parse_money(text)
         if error:
@@ -285,5 +331,5 @@ async def handle_message(message: types.Message):
 
 # --- ЗАПУСК ---
 if __name__ == "__main__":
-    print("🚀 FINBRO PRO ЗАПУЩЕН!")
+    print("🚀 FINBRO PRO C ТРЕНЕРОМ ЗАПУЩЕН!")
     asyncio.run(dp.start_polling(bot))
