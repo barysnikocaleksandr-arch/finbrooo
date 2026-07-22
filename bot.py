@@ -28,7 +28,7 @@ BOT_TOKEN = "8856832421:AAEWvsUoVd5XTpOsnRcSfWSrCsM8jlvp-mw"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- КНОПКИ МЕНЮ ---
+# --- КНОПКИ МЕНЮ (Новейший синтаксис) ---
 def get_main_keyboard():
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
@@ -202,5 +202,5 @@ async def handle_message(message: types.Message):
 
 # --- ЗАПУСК ---
 if __name__ == "__main__":
-    print("🚀 Бот и веб-заглушка запущены! Render теперь доволен.")
+    print("🚀 Бот с новым aiogram и заглушкой запущен!")
     asyncio.run(dp.start_polling(bot))
