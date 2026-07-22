@@ -7,6 +7,19 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from datetime import datetime
 
+# Заглушка, чтобы Render не убивал бота
+from aiohttp import web
+import threading
+
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    web.run_app(app, host='0.0.0.0', port=10000)
+
+threading.Thread(target=run_web_server, daemon=True).start()
 BOT_TOKEN = "8856832421:AAEWvsUoVd5XTpOsnRcSfWSrCsM8jlvp-mw"
 
 bot = Bot(token=BOT_TOKEN)
@@ -177,4 +190,5 @@ async def handle_message(message: types.Message):
             )
 
 if __name__ == "__main__":
+    print("🚀 Бот и веб-заглушка запущены! Render теперь доволен.")
     asyncio.run(dp.start_polling(bot))
