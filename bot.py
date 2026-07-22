@@ -4,12 +4,20 @@ import sqlite3
 import io
 import matplotlib.pyplot as plt
 from aiogram import Bot, Dispatcher, types
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from datetime import datetime
 
 BOT_TOKEN = "8856832421:AAEWvsUoVd5XTpOsnRcSfWSrCsM8jlvp-mw"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# --- КНОПКИ МЕНЮ ---
+def get_main_keyboard():
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(KeyboardButton("💰 Баланс"), KeyboardButton("📊 Статистика"))
+    keyboard.add(KeyboardButton("🎯 Цель"))
+    return keyboard
 
 conn = sqlite3.connect('finance.db')
 cursor = conn.cursor()
@@ -98,49 +106,57 @@ def create_stats_chart():
 
 @dp.message()
 async def handle_message(message: types.Message):
-    text = message.text.lower()
+    text = message.text
     
-    if text == "/start":
-        await message.answer(
-            "🤖 Я Finbro. Без нейросетей, но с отличной логикой!\n\n"
-            "📝 Пиши:\n"
-            "- Заправил машину 1500 (Транспорт)\n"
-            "- Поужинал в ресторане 2000 (Еда)\n"
-            "- Зарплата 45000 (Доход)\n\n"
-            "📊 /статистика - график расходов\n"
-            "💰 /баланс - баланс\n"
-            "🎯 /цель 100000 3 - цель"
-        )
-    
-    elif text == "/баланс":
+    # Обработка кнопок
+    if text == "💰 Баланс":
         balance = get_balance()
-        await message.answer(f"💰 Твой текущий баланс: **{balance} ₽**")
+        await message.answer(f"💰 Твой текущий баланс: **{balance} ₽**", reply_markup=get_main_keyboard())
+        return
         
-    elif text == "/статистика":
+    elif text == "📊 Статистика":
         chart = create_stats_chart()
         if chart:
-            await message.answer_photo(photo=types.BufferedInputFile(chart.read(), filename="stats.png"), caption="📊 Вот как распределяются твои траты")
+            await message.answer_photo(photo=types.BufferedInputFile(chart.read(), filename="stats.png"), caption="📊 Вот как распределяются твои траты", reply_markup=get_main_keyboard())
         else:
-            await message.answer("📭 У тебя пока нет записанных расходов.")
+            await message.answer("📭 У тебя пока нет записанных расходов.", reply_markup=get_main_keyboard())
+        return
         
-    elif text.startswith("/цель"):
-        parts = text.split()
+    elif text == "🎯 Цель":
+        await message.answer("📝 Напиши цель в формате:\n`/цель 100000 6`\n(где 100000 - сумма, 6 - месяцев)", reply_markup=get_main_keyboard())
+        return
+
+    text_lower = text.lower()
+    
+    if text_lower == "/start":
+        await message.answer(
+            "🤖 Я Finbro. Без нейросетей, но с отличной логикой!\n\n"
+            "📝 Просто пиши о тратах текстом:\n"
+            "- Заправил машину 1500\n"
+            "- Поужинал в ресторане 2000\n"
+            "- Зарплата 45000\n\n"
+            "👇 Пользуйся кнопками снизу для быстрых команд!",
+            reply_markup=get_main_keyboard()
+        )
+    
+    elif text_lower.startswith("/цель"):
+        parts = text_lower.split()
         if len(parts) < 3:
-            await message.answer("❌ Формат: /цель [сумма] [месяцев]. Например: /цель 300000 6")
+            await message.answer("❌ Формат: /цель [сумма] [месяцев]. Например: /цель 300000 6", reply_markup=get_main_keyboard())
             return
         try:
             target = int(parts[1])
             months = int(parts[2])
         except:
-            await message.answer("❌ Укажи цифры.")
+            await message.answer("❌ Укажи цифры.", reply_markup=get_main_keyboard())
             return
         needed_per_month = target / months
-        await message.answer(f"🎯 **Цель:** {target} ₽ за {months} мес.\n📆 Нужно откладывать: **{needed_per_month:,.0f} ₽/мес**.")
+        await message.answer(f"🎯 **Цель:** {target} ₽ за {months} мес.\n📆 Нужно откладывать: **{needed_per_month:,.0f} ₽/мес**.", reply_markup=get_main_keyboard())
 
     else:
         t_type, amount, category, error = parse_money(text)
         if error:
-            await message.answer(f"❌ {error}")
+            await message.answer(f"❌ {error}", reply_markup=get_main_keyboard())
         else:
             save_transaction(t_type, amount, category, text)
             sign = "+" if t_type == "Доход" else "-"
@@ -156,8 +172,8 @@ async def handle_message(message: types.Message):
                 f"✅ Записал {t_type}!\n"
                 f"Сумма: {sign}{amount} ₽\n"
                 f"Категория: {emoji} {category}\n"
-                f"📅 {datetime.now().strftime('%d.%m.%Y')}\n\n"
-                f"💡 Напиши /статистика, чтобы увидеть график."
+                f"📅 {datetime.now().strftime('%d.%m.%Y')}",
+                reply_markup=get_main_keyboard()
             )
 
 if __name__ == "__main__":
