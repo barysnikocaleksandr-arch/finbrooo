@@ -7,7 +7,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from datetime import datetime
 
-# --- Заглушка для Render (чтобы не убивал бота) ---
+# --- Заглушка для Render ---
 from aiohttp import web
 import threading
 async def handle(request):
@@ -24,7 +24,7 @@ BOT_TOKEN = "8856832421:AAEWvsUoVd5XTpOsnRcSfWSrCsM8jlvp-mw"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- КНОПКИ МЕНЮ ---
+# --- КНОПКИ ---
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -37,7 +37,6 @@ def get_main_keyboard():
 # --- БАЗА ДАННЫХ ---
 conn = sqlite3.connect('finance.db')
 cursor = conn.cursor()
-# Таблица для транзакций
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,7 +48,6 @@ cursor.execute('''
         comment TEXT
     )
 ''')
-# Таблица для лимитов пользователей
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS user_limits (
         user_id INTEGER PRIMARY KEY,
@@ -69,9 +67,7 @@ def save_transaction(user_id, t_type, amount, category, comment):
 def get_user_limit(user_id):
     cursor.execute("SELECT daily_limit FROM user_limits WHERE user_id = ?", (user_id,))
     res = cursor.fetchone()
-    if res:
-        return res[0]
-    return 1500 # Дефолтный лимит, если пользователь его не менял
+    return res[0] if res else 1500
 
 def set_user_limit(user_id, new_limit):
     cursor.execute("INSERT OR REPLACE INTO user_limits (user_id, daily_limit) VALUES (?, ?)", (user_id, new_limit))
@@ -93,9 +89,11 @@ def get_today_expenses(user_id):
     cursor.execute("SELECT SUM(amount) FROM transactions WHERE user_id = ? AND type = 'Расход' AND date = ?", (user_id, today))
     return cursor.fetchone()[0] or 0
 
-def get_avg_monthly_expense(user_id):
-    cursor.execute("SELECT SUM(amount) FROM transactions WHERE user_id = ? AND type = 'Расход' AND date >= date('now', '-30 days')", (user_id,))
-    return cursor.fetchone()[0] or 0
+def get_avg_daily_expense(user_id):
+    # Считаем средние траты за последние 7 дней
+    cursor.execute("SELECT AVG(amount) FROM (SELECT SUM(amount) as amount FROM transactions WHERE user_id = ? AND type = 'Расход' GROUP BY date ORDER BY date DESC LIMIT 7)", (user_id,))
+    res = cursor.fetchone()[0]
+    return int(res) if res else 0
 
 # --- ПАРСЕР ---
 def parse_money(text):
@@ -138,7 +136,7 @@ def parse_money(text):
         
     return "Расход", amount, "Прочее", None
 
-# --- КРАСИВЫЙ ГЕНЕРАТОР ГРАФИКОВ ---
+# --- ПРОДВИНУТЫЙ ГЕНЕРАТОР ГРАФИКОВ ---
 def create_stats_chart(user_id):
     categories = get_category_expenses(user_id)
     if not categories:
@@ -147,28 +145,34 @@ def create_stats_chart(user_id):
     labels = [cat[0] for cat in categories]
     sizes = [cat[1] for cat in categories]
     
-    # Красивые цвета и настройка
-    plt.figure(figsize=(8, 6))
-    colors = plt.get_cmap('Set3')(range(len(labels)))
+    # Стиль как в банковских приложениях (светлая тема с тенями)
+    fig, ax = plt.subplots(figsize=(8, 8), facecolor='#f8f9fa')
+    colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22']
     
-    # Рисуем круг с четкими границами и процентами
-    wedges, texts, autotexts = plt.pie(
+    wedges, texts, autotexts = ax.pie(
         sizes, 
         labels=labels, 
         autopct='%1.0f%%', 
-        startangle=140, 
+        startangle=90,
         colors=colors,
-        wedgeprops={'edgecolor': 'white', 'linewidth': 2}
+        wedgeprops={'edgecolor': 'white', 'linewidth': 3, 'antialiased': True}
     )
     
-    # Делаем шрифты жирными и крупными
-    plt.setp(autotexts, size=12, weight="bold", color="white")
-    plt.setp(texts, size=12, weight="bold")
-    plt.title("Ваши расходы", fontsize=16, weight='bold', color='#333333')
+    # Крупный шрифт для процентов
+    for autotext in autotexts:
+        autotext.set_color('white')
+        autotext.set_fontsize(12)
+        autotext.set_fontweight('bold')
+        
+    for text in texts:
+        text.set_fontsize(14)
+        text.set_fontweight('bold')
+        text.set_color('#2c3e50')
+        
+    ax.set_title("📊 Распределение расходов", fontsize=20, color='#2c3e50', pad=20, fontweight='bold')
     
-    # Сохраняем в память
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
     buf.seek(0)
     plt.close()
     return buf
@@ -188,18 +192,18 @@ async def handle_message(message: types.Message):
     elif text == "📊 Статистика":
         chart = create_stats_chart(user_id)
         if chart:
-            await message.answer_photo(photo=types.BufferedInputFile(chart.read(), filename="stats.png"), caption="📊 Красивый график твоих трат", reply_markup=get_main_keyboard())
+            await message.answer_photo(photo=types.BufferedInputFile(chart.read(), filename="stats.png"), caption="📊 Вот куда уходят твои деньги", reply_markup=get_main_keyboard())
         else:
-            await message.answer("📭 Пока нет расходов.", reply_markup=get_main_keyboard())
+            await message.answer("📭 Пока нет расходов для статистики.", reply_markup=get_main_keyboard())
         return
         
     elif text == "🎯 Цель":
-        await message.answer("📝 Напиши цель в формате:\n`/цель 100000 6`\n(где 100000 - сумма, 6 - месяцев)", reply_markup=get_main_keyboard())
+        await message.answer("📝 Отправь цель в формате:\n`/цель 100000 6`\n(100000 - сумма, 6 - месяцев)", reply_markup=get_main_keyboard())
         return
 
     elif text == "⚙️ Мой лимит":
         curr_limit = get_user_limit(user_id)
-        await message.answer(f"⚙️ Твой текущий лимит на день: **{curr_limit} ₽**\n\nЧтобы изменить, просто напиши новую сумму цифрами (например: `3000`)", reply_markup=get_main_keyboard())
+        await message.answer(f"⚙️ Твой текущий лимит: **{curr_limit} ₽/день**\n\nЧтобы изменить, просто напиши новую сумму цифрами (например, `2500`).", reply_markup=get_main_keyboard())
         return
 
     text_lower = text.lower()
@@ -207,10 +211,10 @@ async def handle_message(message: types.Message):
     # --- КОМАНДЫ ---
     if text_lower == "/start":
         await message.answer(
-            "🤖 Я Finbro MAX. Могу всё!\n\n"
-            "📝 Пиши о деньгах любой фразой.\n"
-            "⚙️ Нажми 'Мой лимит' чтобы настроить бюджет на день.\n"
-            "📊 Смотри красивые графики!\n\n"
+            "🤖 **Finbro PRO** — твой личный ИИ-коуч!\n\n"
+            "📝 Просто пиши: *'Такси 350'* или *'Зарплата 45000'*\n"
+            "⚙️ Настрой лимит дня.\n"
+            "🎯 Ставь цели и получай советы.\n\n"
             "👇 Жми на кнопки!",
             reply_markup=get_main_keyboard()
         )
@@ -228,29 +232,30 @@ async def handle_message(message: types.Message):
             return
             
         current_balance = get_balance(user_id)
-        avg_spend = get_avg_monthly_expense(user_id)
+        avg_daily_spend = get_avg_daily_expense(user_id)
         needed_per_month = target / months
         
         reply = f"🎯 **Цель:** {target} ₽ за {months} мес.\n"
-        reply += f"📆 Нужно: **{needed_per_month:,.0f} ₽/мес**.\n\n"
+        reply += f"📆 Нужно откладывать: **{needed_per_month:,.0f} ₽/мес**.\n\n"
         
         if current_balance >= target:
-            reply += "✅ У тебя уже есть эта сумма!"
+            reply += "✅ У тебя уже есть эта сумма! Можешь покупать прямо сейчас!"
         else:
-            diff = max(0, needed_per_month - (current_balance / months))
-            if diff > 0:
-                reply += f"💡 *Совет:* Твои средние траты: {avg_spend:,.0f} ₽. Откладывай сразу после получения денег."
+            reply += f"📊 Твои средние траты в день: **{avg_daily_spend} ₽**\n"
+            safe_to_save = max(0, (avg_daily_spend * 30) - needed_per_month)
+            
+            if safe_to_save > 0:
+                reply += f"💡 *Совет:* Сократив ненужные траты на {safe_to_save} ₽ в месяц, ты достигнешь цели без стресса."
             else:
-                reply += "📊 Ты справляешься!"
+                reply += "💡 *Совет:* Чтобы достичь цели, попробуй найти дополнительный источник дохода или увеличить срок накопления."
                 
         await message.answer(reply, reply_markup=get_main_keyboard())
 
-    # --- ЕСЛИ ПОЛЬЗОВАТЕЛЬ ПЫТАЕТСЯ ИЗМЕНИТЬ ЛИМИТ (Цифры в ответ на кнопку) ---
+    # --- СМЕНА ЛИМИТА ---
     elif text.isdigit():
-        # Если пользователь отправил просто число, считаем это новым лимитом
         new_limit = int(text)
         set_user_limit(user_id, new_limit)
-        await message.answer(f"✅ Новый дневной лимит установлен: **{new_limit} ₽**!", reply_markup=get_main_keyboard())
+        await message.answer(f"✅ Дневной лимит обновлен до **{new_limit} ₽**!", reply_markup=get_main_keyboard())
 
     # --- ЗАПИСЬ ТРАТ ---
     else:
@@ -261,31 +266,24 @@ async def handle_message(message: types.Message):
             save_transaction(user_id, t_type, amount, category, text)
             sign = "+" if t_type == "Доход" else "-"
             
-            category_emoji = {
-                "Еда": "🍔", "Транспорт": "🚗", "Жилье": "🏠", 
-                "Развлечения": "🎮", "Покупки": "🛍️", "Здоровье": "💊", 
-                "Доход": "💰", "Прочее": "📌"
-            }
+            category_emoji = {"Еда": "🍔", "Транспорт": "🚗", "Жилье": "🏠", "Развлечения": "🎮", "Покупки": "🛍️", "Здоровье": "💊", "Доход": "💰", "Прочее": "📌"}
             emoji = category_emoji.get(category, "📌")
             
             today_spent = get_today_expenses(user_id)
             daily_limit = get_user_limit(user_id)
-            remaining = max(0, daily_limit - today_spent)
+            remaining = daily_limit - today_spent
             
-            response = (
-                f"✅ Записал {t_type}!\n"
-                f"Сумма: {sign}{amount} ₽\n"
-                f"Категория: {emoji} {category}\n"
-                f"📅 {datetime.now().strftime('%d.%m.%Y')}\n\n"
-            )
+            response = f"✅ Записал {t_type}!\nСумма: {sign}{amount} ₽\nКатегория: {emoji} {category}\n📅 {datetime.now().strftime('%d.%m.%Y')}\n\n"
             
             if t_type == "Расход":
-                response += f"💸 Сегодня потрачено: {today_spent} ₽\n"
-                response += f"📉 Остаток лимита: **{remaining} ₽**"
+                if remaining < 0:
+                    response += f"❌ Превышение лимита! Перерасход: **{abs(remaining)} ₽**"
+                else:
+                    response += f"💸 Сегодня потрачено: **{today_spent} ₽**\n📉 Остаток лимита: **{remaining} ₽**"
             
             await message.answer(response, reply_markup=get_main_keyboard())
 
 # --- ЗАПУСК ---
 if __name__ == "__main__":
-    print("🚀 FINBRO MAX ЗАПУЩЕН!")
+    print("🚀 FINBRO PRO ЗАПУЩЕН!")
     asyncio.run(dp.start_polling(bot))
