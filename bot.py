@@ -1,6 +1,3 @@
-# Устанавливаем библиотеки
-!pip install aiogram matplotlib
-
 import asyncio
 import re
 import sqlite3
@@ -9,13 +6,11 @@ import matplotlib.pyplot as plt
 from aiogram import Bot, Dispatcher, types
 from datetime import datetime
 
-# --- ТВОИ КЛЮЧИ ---
 BOT_TOKEN = "8856832421:AAEWvsUoVd5XTpOsnRcSfWSrCsM8jlvp-mw"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- 1. БАЗА ДАННЫХ ---
 conn = sqlite3.connect('finance.db')
 cursor = conn.cursor()
 cursor.execute('''
@@ -30,7 +25,6 @@ cursor.execute('''
 ''')
 conn.commit()
 
-# --- 2. ФУНКЦИИ БАЗЫ ---
 def save_transaction(t_type, amount, category, comment):
     today = datetime.now().strftime("%d.%m.%Y")
     cursor.execute('''
@@ -47,11 +41,9 @@ def get_balance():
     return income - expense
 
 def get_category_expenses():
-    # Игнорируем категорию "Не указана" в графике, чтобы не портить вид
     cursor.execute("SELECT category, SUM(amount) FROM transactions WHERE type = 'Расход' AND category != 'Не указана' GROUP BY category")
     return cursor.fetchall()
 
-# --- 3. ТОЧНЫЙ И РАСШИРЕННЫЙ ПАРСЕР ---
 def parse_money(text):
     amounts = re.findall(r'\b\d+\b', text)
     if not amounts:
@@ -60,42 +52,32 @@ def parse_money(text):
     amount = int(amounts[0])
     text_lower = text.lower()
     
-    # 1. Доходы
     if any(word in text_lower for word in ['получил', 'зарплата', 'заработал', 'доход', 'пришло', 'перевели', 'аванс', 'продал', 'премия', 'выплата']):
         return "Доход", amount, "Доход", None
         
-    # 2. Расходы: Транспорт (ДОБАВИЛИ МАШИНУ)
     if any(word in text_lower for word in ['такси', 'метро', 'автобус', 'заправка', 'бензин', 'парковка', 'машина', 'авто', 'заправил', 'топливо', 'газ']):
         return "Расход", amount, "Транспорт", None
         
-    # 3. Расходы: Еда
     if any(word in text_lower for word in ['кафе', 'ресторан', 'поужинал', 'обед', 'шаурма', 'кофе', 'пицца', 'продукты', 'магазин', 'суши', 'бургер', 'еда', 'завтрак', 'ужин']):
         return "Расход", amount, "Еда", None
         
-    # 4. Расходы: Жилье и счета
     if any(word in text_lower for word in ['квартира', 'аренда', 'коммуналка', 'свет', 'вода', 'газ', 'интернет', 'телефон', 'связь', 'хозяева']):
         return "Расход", amount, "Жилье", None
         
-    # 5. Расходы: Развлечения
     if any(word in text_lower for word in ['кино', 'бар', 'клуб', 'концерт', 'игры', 'плейстейшн', 'развлечения', 'караоке']):
         return "Расход", amount, "Развлечения", None
         
-    # 6. Расходы: Покупки (вещи)
     if any(word in text_lower for word in ['купил', 'телефон', 'ноутбук', 'одёжда', 'штаны', 'куртка', 'кроссовки', 'ботинки', 'джинсы', 'техника']):
         return "Расход", amount, "Покупки", None
         
-    # 7. Расходы: Здоровье
     if any(word in text_lower for word in ['врач', 'лекарство', 'аптека', 'больница', 'таблетки', 'зубы', 'стоматолог']):
         return "Расход", amount, "Здоровье", None
         
-    # 8. Если есть слово "потратил" - это 100% расход
     if any(word in text_lower for word in ['потратил', 'расход', 'оплатил', 'отдал', 'снял']):
         return "Расход", amount, "Прочее", None
         
-    # 9. Если совсем ничего не понятно, по умолчанию ставим Расход (чтобы не переспрашивал), но пишем "Прочее"
     return "Расход", amount, "Прочее", None
 
-# --- 4. ГЕНЕРАТОР ГРАФИКОВ ---
 def create_stats_chart():
     categories = get_category_expenses()
     if not categories:
@@ -114,7 +96,6 @@ def create_stats_chart():
     plt.close()
     return buf
 
-# --- 5. ОБРАБОТЧИК СООБЩЕНИЙ ---
 @dp.message()
 async def handle_message(message: types.Message):
     text = message.text.lower()
@@ -157,9 +138,7 @@ async def handle_message(message: types.Message):
         await message.answer(f"🎯 **Цель:** {target} ₽ за {months} мес.\n📆 Нужно откладывать: **{needed_per_month:,.0f} ₽/мес**.")
 
     else:
-        # Запускаем точный парсер
         t_type, amount, category, error = parse_money(text)
-        
         if error:
             await message.answer(f"❌ {error}")
         else:
@@ -181,10 +160,5 @@ async def handle_message(message: types.Message):
                 f"💡 Напиши /статистика, чтобы увидеть график."
             )
 
-# --- 6. ЗАПУСК ---
-async def main():
-    print("🚀 Бот запущен! Теперь он понимает даже 'Машину'.")
-    await dp.start_polling(bot)
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(dp.start_polling(bot))
