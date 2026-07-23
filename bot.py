@@ -4,20 +4,18 @@ import sqlite3
 import io
 import os
 import pandas as pd
+import matplotlib.pyplot as plt
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# --- Установка библиотек (автоматически) ---
-import subprocess, sys
+# --- Проверка библиотек (без Plotly) ---
 try:
     import openpyxl
-    import plotly.graph_objects as go
-    import plotly.io as pio
 except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "plotly", "kaleido"])
+    pass # Установка здесь не нужна, она будет через requirements
 
 # --- Заглушка для Render ---
 from aiohttp import web
@@ -169,42 +167,44 @@ def parse_money(text):
         
     return "Расход", amount, "Прочее", None
 
-# --- 🌟 НОВАЯ ФУНКЦИЯ КРАСИВОГО ГРАФИКА (Plotly) ---
+# --- 🌟 НОВЫЙ, СТАБИЛЬНЫЙ И КРАСИВЫЙ ГРАФИК (Matplotlib с кольцом) ---
 def create_stats_chart(user_id):
     categories = get_category_expenses(user_id)
     if not categories:
         return None
     
     labels = [cat[0] for cat in categories]
-    values = [cat[1] for cat in categories]
+    sizes = [cat[1] for cat in categories]
     
-    # Стильная зеленая цветовая палитра (как на скриншоте)
-    colors = ['#2E8B57', '#3CB371', '#66CDAA', '#90EE90', '#98FB98', '#E0F8E0', '#C1E1C1']
+    # Премиальный дизайн с Donut-графиком
+    fig, ax = plt.subplots(figsize=(7, 7), facecolor='#F8F9FA')
     
-    fig = go.Figure(data=[go.Pie(
+    # Красивые зеленые и изумрудные оттенки
+    colors = ['#1E5631', '#4C9A2A', '#77AC30', '#A4C639', '#C5E17A', '#E2EFDA']
+    
+    wedges, texts, autotexts = ax.pie(
+        sizes, 
         labels=labels, 
-        values=values, 
-        hole=.5, # Делает график кольцевым (Donut)
-        marker=dict(colors=colors, line=dict(color='#FFFFFF', width=2)),
-        textinfo='label+percent',
-        textposition='outside',
-        hoverinfo='label+value',
-        showlegend=False
-    )])
-    
-    # Настройка фона и текста
-    fig.update_layout(
-        title={'text': "💰 Распределение расходов", 'y':0.95, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'},
-        annotations=[dict(text=f"{sum(values):,.0f} ₽", x=0.5, y=0.5, font_size=20, showarrow=False)],
-        paper_bgcolor='#F8F9FA',
-        plot_bgcolor='#F8F9FA',
-        margin=dict(t=60, b=40, l=40, r=40)
+        autopct='%1.0f%%', 
+        startangle=90,
+        colors=colors,
+        wedgeprops={'width': 0.4, 'edgecolor': 'white', 'linewidth': 2} # width 0.4 делает из круга кольцо
     )
     
-    # Сохраняем в память (PNG)
+    # Настройка шрифтов
+    plt.setp(autotexts, size=10, weight="bold", color="white")
+    plt.setp(texts, size=11, weight="bold", color="#333333")
+    
+    # Вписываем общую сумму в центр кольца
+    total = sum(sizes)
+    ax.text(0, 0, f"{total:,.0f} ₽", ha='center', va='center', fontsize=20, fontweight='bold', color='#333333')
+    
+    ax.set_title("💰 Мои расходы", fontsize=16, color='#2C3E50', fontweight='bold', pad=20)
+    
     buf = io.BytesIO()
-    pio.write_image(fig, buf, format='png', width=800, height=600, scale=2)
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='#F8F9FA')
     buf.seek(0)
+    plt.close()
     return buf
 
 # --- ЭКСПОРТ В EXCEL ---
@@ -260,7 +260,7 @@ async def handle_message(message: types.Message):
     elif text == "📊 Статистика":
         chart = create_stats_chart(user_id)
         if chart:
-            await message.answer_photo(photo=types.BufferedInputFile(chart.read(), filename="stats.png"), caption="📊 Стильная кольцевая диаграмма твоих трат", reply_markup=get_main_keyboard())
+            await message.answer_photo(photo=types.BufferedInputFile(chart.read(), filename="stats.png"), caption="📊 Кольцевая диаграмма твоих трат", reply_markup=get_main_keyboard())
         else:
             await message.answer("📭 Пока нет расходов.", reply_markup=get_main_keyboard())
         return
@@ -301,10 +301,10 @@ async def handle_message(message: types.Message):
     
     if text_lower == "/start":
         await message.answer(
-            "🤖 **Finbro PRO** — премиум аналитика!\n\n"
+            "🤖 **Finbro PRO**!\n\n"
             "📝 Пиши траты: 'Такси 350'\n"
-            "📊 Посмотри на стильную кольцевую диаграмму!\n"
-            "📁 Скачивай Excel с эмоциями.\n\n"
+            "📊 Кольцевой график высокого качества!\n"
+            "📁 Скачивай Excel.\n\n"
             "👇 Жми на кнопки!",
             reply_markup=get_main_keyboard()
         )
@@ -365,7 +365,7 @@ async def handle_message(message: types.Message):
 async def process_mood_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     if user_id not in pending_moods:
-        await callback_query.answer("⏳ Время выбора настроения истекло. Попробуй записать трату заново.")
+        await callback_query.answer("⏳ Время выбора настроения истекло.")
         await callback_query.message.delete()
         return
     t_type, amount, category, comment = pending_moods.pop(user_id)
@@ -382,7 +382,7 @@ async def main():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_morning_report, CronTrigger(hour=8, minute=30))
     scheduler.start()
-    print("🚀 FINBRO PRO (ПРЕМИУМ ДИЗАЙН) ЗАПУЩЕН!")
+    print("🚀 FINBRO PRO (СТАБИЛЬНЫЙ) ЗАПУЩЕН!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
