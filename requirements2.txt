@@ -2,7 +2,5 @@ aiogram
 matplotlib
 pandas
 openpyxl
-plotly
-kaleido
 apscheduler
 aiohttp
