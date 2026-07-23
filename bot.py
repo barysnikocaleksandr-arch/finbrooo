@@ -11,11 +11,13 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# --- Проверка библиотек (без Plotly) ---
+# --- Проверка библиотек ---
 try:
     import openpyxl
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.chart import BarChart, Reference
 except ImportError:
-    pass # Установка здесь не нужна, она будет через requirements
+    pass
 
 # --- Заглушка для Render ---
 from aiohttp import web
@@ -167,57 +169,123 @@ def parse_money(text):
         
     return "Расход", amount, "Прочее", None
 
-# --- 🌟 НОВЫЙ, СТАБИЛЬНЫЙ И КРАСИВЫЙ ГРАФИК (Matplotlib с кольцом) ---
+# --- ГРАФИК ДЛЯ TELEGRAM ---
 def create_stats_chart(user_id):
     categories = get_category_expenses(user_id)
     if not categories:
         return None
-    
     labels = [cat[0] for cat in categories]
     sizes = [cat[1] for cat in categories]
-    
-    # Премиальный дизайн с Donut-графиком
     fig, ax = plt.subplots(figsize=(7, 7), facecolor='#F8F9FA')
-    
-    # Красивые зеленые и изумрудные оттенки
     colors = ['#1E5631', '#4C9A2A', '#77AC30', '#A4C639', '#C5E17A', '#E2EFDA']
-    
-    wedges, texts, autotexts = ax.pie(
-        sizes, 
-        labels=labels, 
-        autopct='%1.0f%%', 
-        startangle=90,
-        colors=colors,
-        wedgeprops={'width': 0.4, 'edgecolor': 'white', 'linewidth': 2} # width 0.4 делает из круга кольцо
-    )
-    
-    # Настройка шрифтов
+    wedges, texts, autotexts = ax.pie(sizes, labels=labels, autopct='%1.0f%%', startangle=90, colors=colors, wedgeprops={'width': 0.4, 'edgecolor': 'white', 'linewidth': 2})
     plt.setp(autotexts, size=10, weight="bold", color="white")
     plt.setp(texts, size=11, weight="bold", color="#333333")
-    
-    # Вписываем общую сумму в центр кольца
     total = sum(sizes)
     ax.text(0, 0, f"{total:,.0f} ₽", ha='center', va='center', fontsize=20, fontweight='bold', color='#333333')
-    
     ax.set_title("💰 Мои расходы", fontsize=16, color='#2C3E50', fontweight='bold', pad=20)
-    
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='#F8F9FA')
     buf.seek(0)
     plt.close()
     return buf
 
-# --- ЭКСПОРТ В EXCEL ---
+# --- 🌟 ЭКСПОРТ В EXCEL (С ДАШБОРДОМ И ГРАФИКОМ) ---
 def create_excel_report(user_id):
     data = get_all_transactions_for_excel(user_id)
     if not data:
         return None
+    
     df = pd.DataFrame(data, columns=['Дата', 'Тип', 'Сумма', 'Категория', 'Комментарий', 'Настроение'])
     mood_map = {'mood_good': '😊 Классно', 'mood_neutral': '😐 Нормально', 'mood_bad': '😡 Жалко', None: '-'}
     df['Настроение'] = df['Настроение'].map(mood_map)
+    
+    # Подсчет итогов для дашборда
+    total_income = df[df['Тип'] == 'Доход']['Сумма'].sum()
+    total_expense = df[df['Тип'] == 'Расход']['Сумма'].sum()
+    balance = total_income - total_expense
+    
+    # Группировка по категориям для графика
+    cat_summary = df[df['Тип'] == 'Расход'].groupby('Категория')['Сумма'].sum().reset_index()
+    cat_summary = cat_summary.sort_values('Сумма', ascending=False)
+    
+    # Создаем Excel файл в памяти
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Финансы')
+        # 1. Лист с данными
+        df.to_excel(writer, index=False, sheet_name='Все операции')
+        
+        # 2. Лист с Дашбордом
+        workbook = writer.book
+        dashboard = workbook.create_sheet('Дашборд')
+        
+        # Стили
+        title_font = Font(size=16, bold=True, color='1E5631')
+        big_font = Font(size=22, bold=True, color='1E5631')
+        green_fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
+        
+        # Название Дашборда
+        dashboard['A1'] = "📊 МОЙ ФИНАНСОВЫЙ ОТЧЕТ"
+        dashboard['A1'].font = title_font
+        dashboard.merge_cells('A1:C1')
+        dashboard['A1'].alignment = Alignment(horizontal='center')
+        
+        # Основные цифры
+        dashboard['A3'] = "💰 Доходы:"
+        dashboard['A4'] = "💸 Расходы:"
+        dashboard['A5'] = "💎 Баланс:"
+        
+        dashboard['B3'] = f"{total_income:,.0f} ₽"
+        dashboard['B4'] = f"{total_expense:,.0f} ₽"
+        dashboard['B5'] = f"{balance:,.0f} ₽"
+        
+        dashboard['B3'].font = big_font
+        dashboard['B4'].font = big_font
+        dashboard['B5'].font = big_font
+        
+        # Красим ячейки
+        for row in range(3, 6):
+            dashboard[f'A{row}'].fill = green_fill
+            dashboard[f'B{row}'].fill = green_fill
+        
+        # Добавляем столбчатую диаграмму (Расходы по категориям)
+        if not cat_summary.empty:
+            # Записываем данные для графика на лист
+            start_row = 8
+            dashboard[f'A{start_row}'] = "Категория"
+            dashboard[f'B{start_row}'] = "Сумма (₽)"
+            dashboard[f'A{start_row}'].font = Font(bold=True)
+            dashboard[f'B{start_row}'].font = Font(bold=True)
+            
+            for i, row in cat_summary.iterrows():
+                r = start_row + i + 1
+                dashboard[f'A{r}'] = row['Категория']
+                dashboard[f'B{r}'] = row['Сумма']
+            
+            # Создаем объект диаграммы
+            chart = BarChart()
+            chart.title = "Траты по категориям"
+            chart.y_axis.title = "Сумма (₽)"
+            chart.x_axis.title = "Категория"
+            chart.width = 10
+            chart.height = 6
+            
+            # Определяем данные для графика
+            data_range = Reference(dashboard, min_col=2, min_row=start_row, max_row=start_row + len(cat_summary))
+            categories_range = Reference(dashboard, min_col=1, min_row=start_row+1, max_row=start_row + len(cat_summary))
+            
+            chart.add_data(data_range, titles_from_data=True)
+            chart.set_categories(categories_range)
+            chart.style = 10 # Выбираем красивый стиль
+            
+            # Вставляем график на лист (справа от цифр)
+            dashboard.add_chart(chart, "E3")
+            
+        # Настраиваем ширину колонок
+        dashboard.column_dimensions['A'].width = 20
+        dashboard.column_dimensions['B'].width = 20
+        dashboard.column_dimensions['E'].width = 30
+        
     output.seek(0)
     return output
 
@@ -290,7 +358,7 @@ async def handle_message(message: types.Message):
         if excel_file:
             await message.answer_document(
                 document=types.BufferedInputFile(excel_file.read(), filename="finbro_report.xlsx"),
-                caption="📄 Твой финансовый отчет готов!",
+                caption="📄 Твой отчет с графиком и дашбордом готов!",
                 reply_markup=get_main_keyboard()
             )
         else:
@@ -301,10 +369,9 @@ async def handle_message(message: types.Message):
     
     if text_lower == "/start":
         await message.answer(
-            "🤖 **Finbro PRO**!\n\n"
+            "🤖 **Finbro PRO** — с Excel дашбордом!\n\n"
             "📝 Пиши траты: 'Такси 350'\n"
-            "📊 Кольцевой график высокого качества!\n"
-            "📁 Скачивай Excel.\n\n"
+            "📁 Скачай Excel, внутри таблица + график!\n\n"
             "👇 Жми на кнопки!",
             reply_markup=get_main_keyboard()
         )
@@ -382,7 +449,7 @@ async def main():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_morning_report, CronTrigger(hour=8, minute=30))
     scheduler.start()
-    print("🚀 FINBRO PRO (СТАБИЛЬНЫЙ) ЗАПУЩЕН!")
+    print("🚀 FINBRO PRO (EXCEL DASHBOARD) ЗАПУЩЕН!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
