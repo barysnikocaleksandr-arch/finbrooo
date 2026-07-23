@@ -3,10 +3,20 @@ import re
 import sqlite3
 import io
 import os
+import pandas as pd
 import matplotlib.pyplot as plt
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from datetime import datetime
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime, timedelta
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+# --- Установка библиотеки для Excel (если её ещё нет) ---
+import subprocess, sys
+try:
+    import openpyxl
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
 
 # --- Заглушка для Render ---
 from aiohttp import web
@@ -25,19 +35,7 @@ BOT_TOKEN = "8856832421:AAEWvsUoVd5XTpOsnRcSfWSrCsM8jlvp-mw"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- КНОПКИ ---
-def get_main_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="⚙️ Мой лимит"), KeyboardButton(text="🎯 Цель")],
-            [KeyboardButton(text="🧘 Тренер")]
-        ],
-        resize_keyboard=True
-    )
-
-# --- БАЗА ДАННЫХ (БЕЗОПАСНОЕ МЕСТО) ---
-# Используем папку /tmp, она не удаляется Render-ом
+# --- БАЗА ДАННЫХ ---
 DB_PATH = '/tmp/finance.db'
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
@@ -49,7 +47,8 @@ cursor.execute('''
         amount INTEGER,
         category TEXT,
         date TEXT,
-        comment TEXT
+        comment TEXT,
+        mood TEXT
     )
 ''')
 cursor.execute('''
@@ -60,13 +59,36 @@ cursor.execute('''
 ''')
 conn.commit()
 
-# --- ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ (КРОМЕ ТРЕНЕРА) ---
-def save_transaction(user_id, t_type, amount, category, comment):
+# --- КНОПКИ МЕНЮ ---
+def get_main_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="⚙️ Мой лимит"), KeyboardButton(text="🎯 Цель")],
+            [KeyboardButton(text="🧘 Тренер"), KeyboardButton(text="📁 Скачать Excel")]
+        ],
+        resize_keyboard=True
+    )
+
+# --- ИНЛАЙН-КЛАВИАТУРА ДЛЯ НАСТРОЕНИЯ (ЭМОДЗИ) ---
+def get_mood_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="😊 Классно", callback_data="mood_good"),
+         InlineKeyboardButton(text="😐 Нормально", callback_data="mood_neutral"),
+         InlineKeyboardButton(text="😡 Жалко", callback_data="mood_bad")]
+    ])
+
+# --- ХРАНИЛИЩЕ ДЛЯ ПОСЛЕДНЕЙ ТРАТЫ (чтобы привязать эмоцию) ---
+# Словарь: user_id -> (type, amount, category, comment)
+pending_moods = {}
+
+# --- ФУНКЦИИ БАЗЫ ---
+def save_transaction(user_id, t_type, amount, category, comment, mood=None):
     today = datetime.now().strftime("%d.%m.%Y")
     cursor.execute('''
-        INSERT INTO transactions (user_id, type, amount, category, date, comment)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (user_id, t_type, amount, category, today, comment))
+        INSERT INTO transactions (user_id, type, amount, category, date, comment, mood)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, t_type, amount, category, today, comment, mood))
     conn.commit()
 
 def get_user_limit(user_id):
@@ -94,15 +116,25 @@ def get_today_expenses(user_id):
     cursor.execute("SELECT SUM(amount) FROM transactions WHERE user_id = ? AND type = 'Расход' AND date = ?", (user_id, today))
     return cursor.fetchone()[0] or 0
 
+def get_yesterday_expenses(user_id):
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%d.%m.%Y")
+    cursor.execute("SELECT SUM(amount) FROM transactions WHERE user_id = ? AND type = 'Расход' AND date = ?", (user_id, yesterday))
+    return cursor.fetchone()[0] or 0
+
 def get_avg_daily_expense(user_id):
     cursor.execute("SELECT AVG(amount) FROM (SELECT SUM(amount) as amount FROM transactions WHERE user_id = ? AND type = 'Расход' GROUP BY date ORDER BY date DESC LIMIT 7)", (user_id,))
     res = cursor.fetchone()[0]
     return int(res) if res else 0
 
+def get_all_transactions_for_excel(user_id):
+    cursor.execute("SELECT date, type, amount, category, comment, mood FROM transactions WHERE user_id = ? ORDER BY date DESC", (user_id,))
+    return cursor.fetchall()
+
+# --- ПАРСЕР ---
 def parse_money(text):
     amounts = re.findall(r'\b\d+\b', text)
     if not amounts:
-        return None, None, None, "Я не нашел сумму. Напиши число."
+        return None, None, None, "Я не нашел сумму."
     amount = int(amounts[0])
     t_lower = text.lower()
     
@@ -139,6 +171,7 @@ def parse_money(text):
         
     return "Расход", amount, "Прочее", None
 
+# --- ГРАФИК ---
 def create_stats_chart(user_id):
     categories = get_category_expenses(user_id)
     if not categories:
@@ -159,33 +192,52 @@ def create_stats_chart(user_id):
     plt.close()
     return buf
 
-def get_financial_advice(user_id):
-    categories = get_category_expenses(user_id, days=14)
-    avg_spend = get_avg_daily_expense(user_id)
-    reply = "🧘 **Финансовый тренер:**\n\n"
-    if avg_spend == 0:
-        reply += "📭 Запиши больше трат, я дам разбор!"
-        return reply
-    reply += f"📊 Твой средний расход в день: **{avg_spend} ₽**\n\n"
-    category_dict = {cat[0]: cat[1] for cat in categories}
-    tips = []
-    if 'Еда' in category_dict and category_dict['Еда'] > avg_spend * 5:
-        tips.append("🍔 Много на еду. Готовь дома.")
-    if 'Транспорт' in category_dict and category_dict['Транспорт'] > avg_spend * 3:
-        tips.append("🚗 Много на такси/бензин.")
-    if 'Развлечения' in category_dict and category_dict['Развлечения'] > avg_spend * 4:
-        tips.append("🎮 Много на развлечения.")
-    if 'Покупки' in category_dict and category_dict['Покупки'] > avg_spend * 3:
-        tips.append("🛍️ Много шопинга. Отложи импульсивные покупки.")
-    balance = get_balance(user_id)
-    if balance < avg_spend * 10:
-        tips.append("💰 Нет подушки безопасности. Откладывай 10% дохода.")
-    if not tips:
-        reply += "✅ Идеальный баланс! Продолжай в том же духе!"
-    else:
-        reply += "💡 **Советы:**\n" + "\n".join([f"- {t}" for t in tips[:3]])
-    return reply
+# --- ЭКСПОРТ В EXCEL ---
+def create_excel_report(user_id):
+    data = get_all_transactions_for_excel(user_id)
+    if not data:
+        return None
+    
+    # Создаем DataFrame из данных
+    df = pd.DataFrame(data, columns=['Дата', 'Тип', 'Сумма', 'Категория', 'Комментарий', 'Настроение'])
+    
+    # Переводим символы в понятные названия
+    mood_map = {'mood_good': '😊 Классно', 'mood_neutral': '😐 Нормально', 'mood_bad': '😡 Жалко', None: '-'}
+    df['Настроение'] = df['Настроение'].map(mood_map)
+    
+    # Сохраняем в память
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Финансы')
+    output.seek(0)
+    return output
 
+# --- УТРЕННИЙ ОТЧЕТ ---
+async def send_morning_report():
+    print("🌅 Отправляю утренние отчеты...")
+    cursor.execute("SELECT DISTINCT user_id FROM transactions")
+    users = cursor.fetchall()
+    for user_tuple in users:
+        user_id = user_tuple[0]
+        try:
+            yesterday_spent = get_yesterday_expenses(user_id)
+            daily_limit = get_user_limit(user_id)
+            balance = get_balance(user_id)
+            report = f"☀️ **Доброе утро!** Отчет за вчера:\n\n"
+            if yesterday_spent == 0:
+                report += "📭 Вчера не было записей о тратах."
+            else:
+                over_limit = yesterday_spent - daily_limit
+                if over_limit > 0:
+                    report += f"🚨 Перерасход на **{over_limit} ₽**.\n"
+                else:
+                    report += f"✅ Ты уложился в лимит.\n💸 Потрачено: **{yesterday_spent} ₽** из {daily_limit} ₽.\n\n"
+            report += f"💰 Баланс: **{balance} ₽**"
+            await bot.send_message(user_id, report)
+        except Exception as e:
+            print(f"Ошибка отправки: {e}")
+
+# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
 @dp.message()
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
@@ -210,21 +262,40 @@ async def handle_message(message: types.Message):
 
     elif text == "⚙️ Мой лимит":
         curr_limit = get_user_limit(user_id)
-        await message.answer(f"⚙️ Твой лимит: **{curr_limit} ₽/день**\n\nНапиши новую сумму цифрами (например, `3000`).", reply_markup=get_main_keyboard())
+        await message.answer(f"⚙️ Твой лимит: **{curr_limit} ₽/день**\n\nНапиши новую сумму цифрами.", reply_markup=get_main_keyboard())
         return
 
     elif text == "🧘 Тренер":
-        advice = get_financial_advice(user_id)
-        await message.answer(advice, reply_markup=get_main_keyboard())
+        avg_spend = get_avg_daily_expense(user_id)
+        if avg_spend == 0:
+            await message.answer("📭 Запиши больше трат, я дам разбор!", reply_markup=get_main_keyboard())
+            return
+        reply = "🧘 **Твой коуч на сегодня:**\n\n"
+        reply += f"📊 Твоя норма в день: **{avg_spend} ₽**.\n"
+        reply += f"💡 Совет: Старайся тратить на 15% меньше нормы.\n"
+        await message.answer(reply, reply_markup=get_main_keyboard())
+        return
+
+    elif text == "📁 Скачать Excel":
+        excel_file = create_excel_report(user_id)
+        if excel_file:
+            await message.answer_document(
+                document=types.BufferedInputFile(excel_file.read(), filename="finbro_report.xlsx"),
+                caption="📄 Твой финансовый отчет готов!",
+                reply_markup=get_main_keyboard()
+            )
+        else:
+            await message.answer("📭 У тебя пока нет записей для отчета.", reply_markup=get_main_keyboard())
         return
 
     text_lower = text.lower()
     
     if text_lower == "/start":
         await message.answer(
-            "🤖 **Finbro PRO** — твой помощник.\n\n"
-            "📝 Пиши: 'Такси 350', 'Зарплата 45000'\n"
-            "🧘 Жми 'Тренер' для разбора трат.\n\n"
+            "🤖 **Finbro PRO** — с эмоциями и Excel!\n\n"
+            "📝 Пиши траты: 'Такси 350'\n"
+            "😊 После записи расхода выбери эмодзи (сохраняется в Excel).\n"
+            "📁 Жми 'Скачать Excel' для полного отчета.\n\n"
             "👇 Жми на кнопки!",
             reply_markup=get_main_keyboard()
         )
@@ -260,21 +331,65 @@ async def handle_message(message: types.Message):
         if error:
             await message.answer(f"❌ {error}", reply_markup=get_main_keyboard())
         else:
-            save_transaction(user_id, t_type, amount, category, text)
-            sign = "+" if t_type == "Доход" else "-"
-            category_emoji = {"Еда": "🍔", "Транспорт": "🚗", "Жилье": "🏠", "Развлечения": "🎮", "Покупки": "🛍️", "Здоровье": "💊", "Доход": "💰", "Прочее": "📌"}
-            emoji = category_emoji.get(category, "📌")
-            today_spent = get_today_expenses(user_id)
-            daily_limit = get_user_limit(user_id)
-            remaining = daily_limit - today_spent
-            response = f"✅ Записал {t_type}!\nСумма: {sign}{amount} ₽\nКатегория: {emoji} {category}\n📅 {datetime.now().strftime('%d.%m.%Y')}\n\n"
-            if t_type == "Расход":
-                if remaining < 0:
-                    response += f"❌ Перерасход: **{abs(remaining)} ₽**"
-                else:
-                    response += f"💸 Остаток лимита: **{remaining} ₽**"
-            await message.answer(response, reply_markup=get_main_keyboard())
+            # Если это доход, записываем сразу без настроения
+            if t_type == "Доход":
+                save_transaction(user_id, t_type, amount, category, text, mood="mood_good")
+                sign = "+"
+                response = f"✅ Записал {t_type}!\nСумма: {sign}{amount} ₽\nКатегория: 💰 Доход\n📅 {datetime.now().strftime('%d.%m.%Y')}\n\n💸 Баланс обновлен!"
+                await message.answer(response, reply_markup=get_main_keyboard())
+            else:
+                # Если расход, сохраняем ВРЕМЕННО и просим настроение
+                # Сохраняем данные в словарь, чтобы потом подтянуть по callback
+                pending_moods[user_id] = (t_type, amount, category, text)
+                
+                today_spent = get_today_expenses(user_id)
+                daily_limit = get_user_limit(user_id)
+                remaining = daily_limit - today_spent
+                
+                response = (
+                    f"✅ Записал {t_type}!\n"
+                    f"Сумма: -{amount} ₽\n"
+                    f"Категория: {category}\n"
+                    f"📅 {datetime.now().strftime('%d.%m.%Y')}\n\n"
+                    f"💸 Сегодня потрачено: **{today_spent} ₽**\n"
+                    f"📉 Остаток лимита: **{remaining} ₽**\n\n"
+                    f"👇 Выбери настроение от этой траты:"
+                )
+                await message.answer(response, reply_markup=get_mood_keyboard())
+
+# --- ОБРАБОТЧИК ИНЛАЙН КНОПОК (ДЛЯ ЭМОДЗИ) ---
+@dp.callback_query()
+async def process_mood_callback(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    
+    if user_id not in pending_moods:
+        await callback_query.answer("⏳ Время выбора настроения истекло. Попробуй записать трату заново.")
+        await callback_query.message.delete()
+        return
+    
+    # Забираем сохраненные данные
+    t_type, amount, category, comment = pending_moods.pop(user_id)
+    mood = callback_query.data # "mood_good", "mood_neutral" или "mood_bad"
+    
+    # Сохраняем в базу с настроением!
+    save_transaction(user_id, t_type, amount, category, comment, mood=mood)
+    
+    mood_emoji = {"mood_good": "😊", "mood_neutral": "😐", "mood_bad": "😡"}
+    emoji = mood_emoji.get(mood, "😐")
+    
+    await callback_query.answer(f"Отлично! Настроение {emoji} сохранено.")
+    await callback_query.message.edit_text(
+        text=f"✅ Запись завершена с настроением {emoji}!\n"
+             f"Ты можешь скачать Excel-отчет через меню, чтобы увидеть свои эмоции по тратам."
+    )
+
+# --- ЗАПУСК ПЛАНИРОВЩИКА И БОТА ---
+async def main():
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(send_morning_report, CronTrigger(hour=8, minute=30))
+    scheduler.start()
+    print("🚀 FINBRO PRO (ЭМОЦИИ + EXCEL) ЗАПУЩЕН!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    print("🚀 FINBRO PRO (СТАБИЛЬНЫЙ) ЗАПУЩЕН!")
-    asyncio.run(dp.start_polling(bot))
+    asyncio.run(main())
