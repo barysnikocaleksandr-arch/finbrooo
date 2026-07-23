@@ -4,19 +4,20 @@ import sqlite3
 import io
 import os
 import pandas as pd
-import matplotlib.pyplot as plt
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# --- Установка библиотеки для Excel (если её ещё нет) ---
+# --- Установка библиотек (автоматически) ---
 import subprocess, sys
 try:
     import openpyxl
+    import plotly.graph_objects as go
+    import plotly.io as pio
 except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "plotly", "kaleido"])
 
 # --- Заглушка для Render ---
 from aiohttp import web
@@ -70,7 +71,6 @@ def get_main_keyboard():
         resize_keyboard=True
     )
 
-# --- ИНЛАЙН-КЛАВИАТУРА ДЛЯ НАСТРОЕНИЯ (ЭМОДЗИ) ---
 def get_mood_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="😊 Классно", callback_data="mood_good"),
@@ -78,8 +78,6 @@ def get_mood_keyboard():
          InlineKeyboardButton(text="😡 Жалко", callback_data="mood_bad")]
     ])
 
-# --- ХРАНИЛИЩЕ ДЛЯ ПОСЛЕДНЕЙ ТРАТЫ (чтобы привязать эмоцию) ---
-# Словарь: user_id -> (type, amount, category, comment)
 pending_moods = {}
 
 # --- ФУНКЦИИ БАЗЫ ---
@@ -171,25 +169,42 @@ def parse_money(text):
         
     return "Расход", amount, "Прочее", None
 
-# --- ГРАФИК ---
+# --- 🌟 НОВАЯ ФУНКЦИЯ КРАСИВОГО ГРАФИКА (Plotly) ---
 def create_stats_chart(user_id):
     categories = get_category_expenses(user_id)
     if not categories:
         return None
+    
     labels = [cat[0] for cat in categories]
-    sizes = [cat[1] for cat in categories]
-    fig, ax = plt.subplots(figsize=(8, 8), facecolor='#f8f9fa')
-    colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22']
-    wedges, texts, autotexts = ax.pie(sizes, labels=labels, autopct='%1.0f%%', startangle=90, colors=colors, wedgeprops={'edgecolor': 'white', 'linewidth': 3})
-    for autotext in autotexts:
-        autotext.set_color('white'); autotext.set_fontsize(12); autotext.set_fontweight('bold')
-    for text in texts:
-        text.set_fontsize(14); text.set_fontweight('bold'); text.set_color('#2c3e50')
-    ax.set_title("📊 Распределение расходов", fontsize=20, color='#2c3e50', pad=20, fontweight='bold')
+    values = [cat[1] for cat in categories]
+    
+    # Стильная зеленая цветовая палитра (как на скриншоте)
+    colors = ['#2E8B57', '#3CB371', '#66CDAA', '#90EE90', '#98FB98', '#E0F8E0', '#C1E1C1']
+    
+    fig = go.Figure(data=[go.Pie(
+        labels=labels, 
+        values=values, 
+        hole=.5, # Делает график кольцевым (Donut)
+        marker=dict(colors=colors, line=dict(color='#FFFFFF', width=2)),
+        textinfo='label+percent',
+        textposition='outside',
+        hoverinfo='label+value',
+        showlegend=False
+    )])
+    
+    # Настройка фона и текста
+    fig.update_layout(
+        title={'text': "💰 Распределение расходов", 'y':0.95, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'},
+        annotations=[dict(text=f"{sum(values):,.0f} ₽", x=0.5, y=0.5, font_size=20, showarrow=False)],
+        paper_bgcolor='#F8F9FA',
+        plot_bgcolor='#F8F9FA',
+        margin=dict(t=60, b=40, l=40, r=40)
+    )
+    
+    # Сохраняем в память (PNG)
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
+    pio.write_image(fig, buf, format='png', width=800, height=600, scale=2)
     buf.seek(0)
-    plt.close()
     return buf
 
 # --- ЭКСПОРТ В EXCEL ---
@@ -197,15 +212,9 @@ def create_excel_report(user_id):
     data = get_all_transactions_for_excel(user_id)
     if not data:
         return None
-    
-    # Создаем DataFrame из данных
     df = pd.DataFrame(data, columns=['Дата', 'Тип', 'Сумма', 'Категория', 'Комментарий', 'Настроение'])
-    
-    # Переводим символы в понятные названия
     mood_map = {'mood_good': '😊 Классно', 'mood_neutral': '😐 Нормально', 'mood_bad': '😡 Жалко', None: '-'}
     df['Настроение'] = df['Настроение'].map(mood_map)
-    
-    # Сохраняем в память
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Финансы')
@@ -251,7 +260,7 @@ async def handle_message(message: types.Message):
     elif text == "📊 Статистика":
         chart = create_stats_chart(user_id)
         if chart:
-            await message.answer_photo(photo=types.BufferedInputFile(chart.read(), filename="stats.png"), caption="📊 Вот куда уходят твои деньги", reply_markup=get_main_keyboard())
+            await message.answer_photo(photo=types.BufferedInputFile(chart.read(), filename="stats.png"), caption="📊 Стильная кольцевая диаграмма твоих трат", reply_markup=get_main_keyboard())
         else:
             await message.answer("📭 Пока нет расходов.", reply_markup=get_main_keyboard())
         return
@@ -292,10 +301,10 @@ async def handle_message(message: types.Message):
     
     if text_lower == "/start":
         await message.answer(
-            "🤖 **Finbro PRO** — с эмоциями и Excel!\n\n"
+            "🤖 **Finbro PRO** — премиум аналитика!\n\n"
             "📝 Пиши траты: 'Такси 350'\n"
-            "😊 После записи расхода выбери эмодзи (сохраняется в Excel).\n"
-            "📁 Жми 'Скачать Excel' для полного отчета.\n\n"
+            "📊 Посмотри на стильную кольцевую диаграмму!\n"
+            "📁 Скачивай Excel с эмоциями.\n\n"
             "👇 Жми на кнопки!",
             reply_markup=get_main_keyboard()
         )
@@ -331,21 +340,16 @@ async def handle_message(message: types.Message):
         if error:
             await message.answer(f"❌ {error}", reply_markup=get_main_keyboard())
         else:
-            # Если это доход, записываем сразу без настроения
             if t_type == "Доход":
                 save_transaction(user_id, t_type, amount, category, text, mood="mood_good")
                 sign = "+"
                 response = f"✅ Записал {t_type}!\nСумма: {sign}{amount} ₽\nКатегория: 💰 Доход\n📅 {datetime.now().strftime('%d.%m.%Y')}\n\n💸 Баланс обновлен!"
                 await message.answer(response, reply_markup=get_main_keyboard())
             else:
-                # Если расход, сохраняем ВРЕМЕННО и просим настроение
-                # Сохраняем данные в словарь, чтобы потом подтянуть по callback
                 pending_moods[user_id] = (t_type, amount, category, text)
-                
                 today_spent = get_today_expenses(user_id)
                 daily_limit = get_user_limit(user_id)
                 remaining = daily_limit - today_spent
-                
                 response = (
                     f"✅ Записал {t_type}!\n"
                     f"Сумма: -{amount} ₽\n"
@@ -357,38 +361,28 @@ async def handle_message(message: types.Message):
                 )
                 await message.answer(response, reply_markup=get_mood_keyboard())
 
-# --- ОБРАБОТЧИК ИНЛАЙН КНОПОК (ДЛЯ ЭМОДЗИ) ---
 @dp.callback_query()
 async def process_mood_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    
     if user_id not in pending_moods:
         await callback_query.answer("⏳ Время выбора настроения истекло. Попробуй записать трату заново.")
         await callback_query.message.delete()
         return
-    
-    # Забираем сохраненные данные
     t_type, amount, category, comment = pending_moods.pop(user_id)
-    mood = callback_query.data # "mood_good", "mood_neutral" или "mood_bad"
-    
-    # Сохраняем в базу с настроением!
+    mood = callback_query.data
     save_transaction(user_id, t_type, amount, category, comment, mood=mood)
-    
     mood_emoji = {"mood_good": "😊", "mood_neutral": "😐", "mood_bad": "😡"}
     emoji = mood_emoji.get(mood, "😐")
-    
     await callback_query.answer(f"Отлично! Настроение {emoji} сохранено.")
     await callback_query.message.edit_text(
-        text=f"✅ Запись завершена с настроением {emoji}!\n"
-             f"Ты можешь скачать Excel-отчет через меню, чтобы увидеть свои эмоции по тратам."
+        text=f"✅ Запись завершена с настроением {emoji}!\nТы можешь скачать Excel-отчет через меню, чтобы увидеть свои эмоции по тратам."
     )
 
-# --- ЗАПУСК ПЛАНИРОВЩИКА И БОТА ---
 async def main():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_morning_report, CronTrigger(hour=8, minute=30))
     scheduler.start()
-    print("🚀 FINBRO PRO (ЭМОЦИИ + EXCEL) ЗАПУЩЕН!")
+    print("🚀 FINBRO PRO (ПРЕМИУМ ДИЗАЙН) ЗАПУЩЕН!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
